@@ -2,47 +2,542 @@ name: CI
 
 on:
   push:
-    branches: [ master ]
+    branches: [main, v2, master]
   pull_request:
-    branches: [ master ]
+    branches: [main, v2, master]
+
+# Read-only default for GITHUB_TOKEN. A job that declares nothing — the `test`
+# job does not — would otherwise inherit the repository setting, which lives
+# outside this file and can be widened without anyone editing it.
+#
+# Two things this does NOT do, since the wording invites both mistakes:
+# `permissions` gates GITHUB_TOKEN only and has no effect on `secrets.*`, so the
+# test job still receives the Docker Hub and Codecov tokens. And a job-level
+# block replaces this one rather than extending it — adding a scope here does
+# not reach any job that declares its own.
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    services:
-      sshd:
-        image: lscr.io/linuxserver/openssh-server:latest
-        env:
-          USER_NAME: test
-          PASSWORD_ACCESS: "true"
-          USER_PASSWORD: secret
-          SUDO_ACCESS: "true"
-        ports:
-          - 2222:2222
-        options: >-
-          --health-cmd="nc -z localhost 2222 || exit 1"
-          --health-interval=2s
-          --health-timeout=2s
-          --health-retries=30
+    env:
+      # Read here rather than in the step's `if:` so the condition can be
+      # evaluated at all — and so a pull request from a fork, which is never
+      # given secrets, resolves it to empty instead of failing.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 20
+          node-version: 22
+          # 90 of the windows job's 140 seconds were an uncached install, and that job
+          # is now the critical path of every PR (test is 112s). Caching npm's own
+          # store changes nothing about what gets installed or built.
+          cache: npm
+
+      # The pnpm packaging test is the only real check that the OTEL imports are
+      # declared rather than resolved by npm's hoisting. Without pnpm on the
+      # runner it skipped, so the check it exists for never ran in CI.
+      - name: Enable corepack (pnpm)
+        run: corepack enable
+
       - run: npm ci
-      - run: npm run build
-      - name: Wait for sshd
+
+      - name: Build
+        # Also required by the e2e suite, which drives the built artifact. With source
+        # maps, which scripts/e2e-coverage.mjs maps the server processes' coverage back
+        # to src/ through. The release builds with `npm run build`, so none reach npm.
+        run: npm run build:coverage
+
+      - name: Dependency resolution check
+        run: npm ls zod zod-to-json-schema @modelcontextprotocol/sdk --all
+
+      - name: Typecheck (src + tests)
+        run: npm run typecheck
+
+      # docker compose rather than `services:`, because two of the test servers
+      # build from local Dockerfiles (Alpine/busybox-ash and Dropbear) and one
+      # mounts an init script — none of which a service container can express.
+      # It also gives the containers a shared network, which the ProxyJump test
+      # needs to resolve the target host from inside the bastion.
+      #
+      # Keeping one definition also stops CI and docker-compose.yml drifting:
+      # CI used to define three of the six servers and none of the sshd tuning.
+      # Anonymous pulls are rate limited per IP and Actions runners share IPs,
+      # so the quota goes to whoever else is on that address. Authenticating
+      # moves the limit onto this account, where a handful of images is nothing.
+      #
+      # This covers `alpine:3.20` and `node:22-slim`, which the build pulls from
+      # Docker Hub. It does *not* cover the sshd image — that comes from GHCR,
+      # and it was the one that actually failed on 2026-08-10. Both registries
+      # are behind the retry below.
+      - name: Log in to Docker Hub
+        # Skipped on pull requests from forks, which are never given secrets.
+        # Those keep pulling anonymously; the retry is what covers them.
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Pull separately from `up` so a throttled registry is retried rather than
+      # failing the job, and so the failure — if it survives three tries — names
+      # the registry instead of surfacing as an opaque compose error.
+      - name: Pull images
         run: |
-          for i in {1..60}; do
-            nc -z 127.0.0.1 2222 && echo "sshd ready" && exit 0
-            sleep 1
+          for attempt in 1 2 3; do
+            if docker compose --profile test pull --quiet; then exit 0; fi
+            if [ "$attempt" -lt 3 ]; then
+              delay=$((attempt * 20))
+              echo "::warning::Image pull failed (attempt $attempt/3); retrying in ${delay}s"
+              sleep "$delay"
+            fi
           done
-          echo "sshd not ready" && exit 1
+          echo "::error::Could not pull the test images after 3 attempts — registry rate limit or outage"
+          exit 1
+
+      - name: Start SSH test servers
+        run: docker compose --profile test up -d --build --wait
+
+      - name: Wait for all sshd servers
+        run: |
+          for port in 2222 2223 2224 2225 2226 2227 2228; do
+            ready=false
+            for i in $(seq 1 60); do
+              if nc -z 127.0.0.1 $port; then echo "sshd on $port ready"; ready=true; break; fi
+              sleep 1
+            done
+            if [ "$ready" != true ]; then echo "::error::sshd on $port never became ready"; exit 1; fi
+          done
+
       - name: Run tests
         env:
           SSH_MCP_DISABLE_MAIN: "1"
-          SSH_HOST: 127.0.0.1
-          SSH_PORT: "2222"
-          SSH_USER: test
-          SSH_PASSWORD: secret
-        run: npm test
+          SSH_MCP_ADMIN_PASSWORD: secret
+          SSH_MCP_OPERATOR_PASSWORD: oppass
+          SSH_MCP_VIEWER_PASSWORD: viewpass
+          SSH_MCP_ADMIN_SUDO_PASSWORD: secret
+          SSH_MCP_OPERATOR_SUDO_PASSWORD: oppass
+          # Without this, integration tests silently skip themselves when a
+          # server is unreachable and CI reports green with zero of them run.
+          SSH_MCP_REQUIRE_SERVERS: "1"
+          # Every process the suite starts writes its V8 coverage here on exit, the
+          # e2e suite's server processes among them. Measured: vitest's own report is
+          # byte-identical with and without it.
+          NODE_V8_COVERAGE: ${{ runner.temp }}/e2e-v8
+        # Same suite as `npm test`, with the v8 reporter attached so the run
+        # that proves the code works is also the one the coverage report comes
+        # from.
+        run: npm run coverage -- --reporter=default --reporter=json --outputFile.json="${{ runner.temp }}/vitest-report.json"
+
+      # Where the run's time went, also when it failed: a test that hits its time limit
+      # is otherwise the only one whose duration the log ever shows.
+      - name: Slowest test files and tests
+        if: ${{ !cancelled() }}
+        run: node scripts/slowest-tests.mjs "${{ runner.temp }}/vitest-report.json"
+
+      # main() runs only in the e2e suite's server processes, which in-process
+      # coverage cannot follow. Converted here, and checked like the report below: a
+      # file with nothing in index.ts would read as main() going untested again.
+      - name: Convert the e2e server processes' coverage
+        run: |
+          node scripts/e2e-coverage.mjs "$RUNNER_TEMP/e2e-v8" coverage/e2e/lcov.info
+          awk '/^SF:src\/index.ts$/{f=1} f&&/^LH:/{print; if ($0 == "LH:0") bad=1; found=1; exit} END{exit (found && !bad) ? 0 : 1}' coverage/e2e/lcov.info \
+            || { echo "coverage/e2e/lcov.info has no hit line in src/index.ts"; exit 1; }
+
+      # #315: ssh2's JavaScript ciphers, which the published Docker image runs, are not
+      # what `npm ci` gives this job — it builds ssh2's native binding. So the ProxyJump
+      # suite runs once more with the binding hidden, after proving the hook hides it, so a
+      # green run cannot have taken the native path.
+      - name: ProxyJump on ssh2's JavaScript ciphers
+        env:
+          SSH_MCP_DISABLE_MAIN: "1"
+          SSH_MCP_REQUIRE_SERVERS: "1"
+          NODE_OPTIONS: --require ./test/integration/fixtures/hide-ssh2-binding.cjs
+        run: |
+          node -e "process.exit(require('ssh2/lib/protocol/crypto.js').bindingAvailable ? 1 : 0)" \
+            || { echo "the hook did not hide ssh2's native binding"; exit 1; }
+          npx vitest --run test/integration/proxy-jump.test.ts
+
+      # An empty or missing report uploads happily and renders as 0%, which is
+      # indistinguishable from having no tests. Fail here instead, where the
+      # cause is obvious — but leave the upload itself non-fatal, so our own
+      # mistakes break the build and Codecov's outages do not.
+      - name: Check the coverage report was produced
+        run: |
+          test -s coverage/lcov.info || { echo "coverage/lcov.info missing or empty"; exit 1; }
+          echo "lcov records: $(grep -c '^SF:' coverage/lcov.info)"
+
+      # One upload with both files, so `after_n_builds: 2` in codecov.yml still counts
+      # this job and `windows`.
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info,./coverage/e2e/lcov.info
+
+      # Service containers surface their logs in the UI automatically; compose
+      # containers do not, so a failure would otherwise be undebuggable.
+      - name: SSH server logs
+        if: failure()
+        run: docker compose --profile test logs --tail=100
+
+  # Windows has been a documented target since 2.0.0 — getConfigPath and
+  # getAuditLogPath both branch on win32 — and until #138 no job had ever
+  # executed either branch. The config file turned out to have never worked
+  # there: checkPermissions read POSIX mode bits, Windows synthesises 0o666 for
+  # every file, and the operator was told their config did not exist.
+  #
+  # Unit and property tests only. The integration suite drives six sshd
+  # containers from docker-compose.yml, all Linux images; a Windows runner adds
+  # nothing there and cannot run them. What it does cover is every path that
+  # asks the OS a question — paths, permissions, the audit log location.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          # 90 of the windows job's 140 seconds were an uncached install, and that job
+          # is now the critical path of every PR (test is 112s). Caching npm's own
+          # store changes nothing about what gets installed or built.
+          cache: npm
+
+      # `prepare` runs `npm run build` on npm ci, so there is no separate Build
+      # step here: a second `tsc` on the slowest and most expensive runner buys
+      # nothing, and nothing in the unit or property suites reads build/.
+      - run: npm ci
+
+      - name: Typecheck (src + tests)
+        run: npm run typecheck
+
+      # With coverage, and uploaded, because the win32 branches are unreachable
+      # from the Ubuntu job by construction. Without this, every Windows-only
+      # line counts as uncovered no matter how thoroughly it is tested here, and
+      # the patch target rejects the next Windows fix on that basis.
+      #
+      # Codecov merges the uploads for a commit by taking the union of hits, so
+      # a line covered on either OS counts as covered. Scoped to unit and
+      # property — the integration suite needs the Linux sshd containers, and
+      # letting it skip here would report its files as untested rather than
+      # unrun.
+      - name: Run unit and property tests with coverage
+        run: npm run coverage:unit -- --reporter=default --reporter=json --outputFile.json="${{ runner.temp }}/vitest-report.json"
+
+      # Where the run's time went, also when it failed: a test that hits its time limit
+      # is otherwise the only one whose duration the log ever shows.
+      - name: Slowest test files and tests
+        if: ${{ !cancelled() }}
+        run: node scripts/slowest-tests.mjs "${{ runner.temp }}/vitest-report.json"
+
+      - name: Check the coverage report was produced
+        shell: bash
+        run: |
+          test -s coverage/lcov.info || { echo "coverage/lcov.info missing or empty"; exit 1; }
+          echo "lcov records: $(grep -c '^SF:' coverage/lcov.info)"
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+
+  # macOS exists in this matrix for one reason: `os.tmpdir()` here is
+  # /var/folders/..., a symlink to /private/var/folders/.... Neither
+  # ubuntu-latest nor windows-latest has a symlinked temp directory, so a path
+  # gate that compares a caller's spelling against a realpath'd root passes
+  # both of them and refuses every legitimate absolute path on a developer's
+  # Mac. That is exactly what happened to the streaming SFTP file tools: two
+  # tests were red locally and no CI job could see it.
+  #
+  # Deliberately lean — no docker, so no integration or e2e suite, and no
+  # coverage upload. The lines are the same ones Ubuntu already covers; what
+  # differs is the filesystem underneath them, which only the unit suite needs.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      # `prepare` runs the build on npm ci, as on the windows job.
+      - run: npm ci
+
+      - name: Typecheck (src + tests)
+        run: npm run typecheck
+
+      # The script, not a raw vitest invocation: it also sets
+      # SSH_MCP_DISABLE_MAIN=1, without which importing the entry point starts
+      # a real server during the suite.
+      - name: Run unit and property tests
+        run: npm run test:unit -- --reporter=default --reporter=json --outputFile.json="${{ runner.temp }}/vitest-report.json"
+
+      # Where the run's time went, also when it failed: a test that hits its time limit
+      # is otherwise the only one whose duration the log ever shows.
+      - name: Slowest test files and tests
+        if: ${{ !cancelled() }}
+        run: node scripts/slowest-tests.mjs "${{ runner.temp }}/vitest-report.json"
+
+  # One context that fails if any other job fails.
+  #
+  # The ruleset used to require `test` and nothing else, so a red `windows` job was
+  # visible but could not block a merge — and deleting the win32 branch in
+  # checkPermissions would have left every required check green, which is how the
+  # regression that change fixed could have come straight back. Requiring `ci`
+  # instead covers every job listed in `needs`, which is why security-scan and
+  # codeql are there too: swapping `test` for a gate that quietly dropped them
+  # would trade one hole for another.
+  #
+  # Done, 2026-08-20: the ruleset now requires `ci` alone, verified through the
+  # rulesets API. This job is no longer advisory — a `windows` failure blocks a
+  # merge. Said explicitly because the previous wording outlived the fix, and a
+  # review round reasoned from it that a Windows-only regression could still ship.
+  ci:
+    runs-on: ubuntu-latest
+    needs: [test, windows, macos, security-scan, codeql, docker]
+    # Not `always()`: that reports red for a run someone cancelled on purpose.
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Report the job results
+        # Through env rather than interpolated into the command. Safe today only because
+        # no job in this file declares `outputs:`, so the JSON can only hold result enums —
+        # and `toJSON` escapes double quotes but not single ones, so the first job output
+        # carrying an apostrophe would break the command, and the first one derived from
+        # `github.event` would make it an injection. That is correctness resting on a
+        # property of the rest of the file, which is what this gate exists to stop.
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: echo "$NEEDS"
+      # An allow-list: anything but `success` fails. This step used to name the
+      # results that fail (`failure`, `cancelled`, `skipped`), and on 2026-10-21 a
+      # macos job that never got a runner came back `abandoned`, which that list
+      # did not name, so the gate reported green with macOS untested. A result
+      # GitHub adds later now fails by default instead of passing by default.
+      #
+      # One expression over every entry of `needs`, so adding a job to `needs`
+      # above covers it by construction. Three explicit comparisons was the first
+      # shape, and it made the gate's correctness depend on three lists staying in
+      # step — the same failure mode one level up from the one this job prevents.
+      - name: Fail unless every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          bad=$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success") | "\(.key): \(.value.result)"')
+          if [ -n "$bad" ]; then
+            echo "::error::not every job succeeded:"
+            echo "$bad"
+            exit 1
+          fi
+
+  security-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # gitleaks scans a commit range, which the default shallow clone
+          # (depth 1) cannot resolve: it fails with "unknown revision" and exits
+          # non-zero having scanned nothing — a red build that says "no leaks
+          # found in partial scan". Full history is what makes the scan real.
+          fetch-depth: 0
+
+      # Run the image directly instead of returntocorp/semgrep-action. That action
+      # is a Docker action whose action.yml is fifteen lines pointing at
+      # `docker://returntocorp/semgrep-agent:v1`, so pinning its commit freezes the
+      # YAML and none of the code that executes. The project is marked deprecated
+      # and was last pushed in January 2024, and that image can no longer parse the
+      # current rule packs: it died with
+      #
+      #   ValueError: invalid rule severity value: MEDIUM
+      #
+      # exited 0, and the step reported success. This gate had been scanning
+      # nothing while reporting green — which is the failure mode the rest of this
+      # workflow exists to prevent. `--error` is what makes findings fail the job,
+      # and the summary is left on deliberately: it ends with a line like
+      # "Ran 112 rules on 90 files: 0 findings", so a clean run leaves evidence it
+      # scanned rather than only the absence of complaint.
+      - name: Semgrep Scan
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src \
+            semgrep/semgrep@sha256:bdf7013b2c3634a487671158da77c554f531742326b543a9464d2adf6c433ac8 \
+            semgrep scan --error --metrics=off \
+              --config=p/javascript \
+              --config=p/nodejs \
+              --config=p/typescript \
+              --config=p/owasp-top-ten \
+              --config=p/command-injection \
+              --exclude=docker/alpine-sshd/Dockerfile \
+              --exclude=docker/dropbear-sshd/Dockerfile \
+              --exclude=.oss-scanner/Dockerfile
+
+      # Excluded above rather than suppressed globally: all three run sshd, which
+      # has to be root to authenticate users and open shells as them, so
+      # `missing-user` is wrong for these files and right everywhere else. The
+      # first two are throwaway test fixtures; .oss-scanner/Dockerfile is the
+      # OSS Scanner's image, whose agent runs as root to start those servers.
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: npm audit
+        run: npm audit --audit-level=high || true
+
+      - name: Dependency review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v4 (branch, not a tag)
+        if: github.event_name == 'pull_request'
+        with:
+          fail-on-severity: high
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          # Note what is *not* pinned here. The action ref fixes its default bundle —
+          # v4.37.6's defaults.json says CLI 2.26.2 — but the action prefers a newer CLI
+          # already in the runner's toolcache, and the run for this commit reported
+          # "Found CodeQL tools version 2.26.3 in the toolcache. Using CodeQL CLI version
+          # 2.26.3". So the analysing version floats with the runner image, not with our
+          # SHA pin. Pass `tools:` if that ever needs to be reproducible.
+          #
+          # `actions` as well as `javascript`. The workflows in this repository are
+          # worth analysing on their own terms: one of them publishes to npm over
+          # OIDC, and the reasoning about `permissions` blocks and `${{ }}`
+          # interpolation lives in comments rather than in anything enforced. The
+          # Actions queries check exactly that class — untrusted input reaching a
+          # `run:` block, over-broad tokens, unpinned actions.
+          languages: javascript,actions
+          config-file: ./.github/codeql-config.yml
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+
+  # Build the image this repo ships, and prove it starts.
+  #
+  # It was documented in the README, wired into docker-compose, and built by
+  # nothing: the only assertion about it anywhere was `packaging.e2e` reading the
+  # Dockerfile as *text*. So `--ignore-scripts`, the non-root UID, the base image
+  # digest and the entry point were all load-bearing and unverified — a Dockerfile
+  # that stopped building would have been found by a user, not by us.
+  #
+  # In the required set (see `ci` above), because a shipped artifact that does not
+  # build is a broken release, not a warning. No `if:` on the job for the same
+  # reason: that gate counts `skipped` as failure.
+  #
+  # Deliberately does not push anywhere. Publishing an image is a separate decision
+  # with its own costs — a `:latest` that ages into CVEs, a second artifact needing
+  # its own provenance and SBOM to match the npm one, and `packages: write` landing
+  # in the workflow npm's trusted publisher is bound to.
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same reasoning as the test job: anonymous Docker Hub pulls are rate limited
+      # per IP and runners share addresses. The base image is digest-pinned, so this
+      # is a pull of exactly one manifest — but it is the one the whole job rests on.
+      - name: Log in to Docker Hub
+        # Skipped on pull requests from forks, which are never given secrets. Those
+        # pull anonymously; the retry below is what covers them.
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build
+        run: |
+          for attempt in 1 2 3; do
+            if docker build -t ssh-mcp:ci .; then exit 0; fi
+            if [ "$attempt" -lt 3 ]; then
+              delay=$((attempt * 20))
+              echo "::warning::Image build failed (attempt $attempt/3); retrying in ${delay}s"
+              sleep "$delay"
+            fi
+          done
+          echo "::error::Could not build the image after 3 attempts"
+          exit 1
+
+      # Building proves the Dockerfile parses and npm ci succeeds. It does not prove
+      # the result runs — a wrong ENTRYPOINT, a permission the non-root user does not
+      # have on its config dir, or a build stage that copied the wrong path all
+      # produce an image that builds and dies on start.
+      #
+      # The image has no config, so this exercises the unconfigured path the server
+      # gained in 2.4.0: it must answer the handshake, list every tool, and refuse a
+      # call. That is also what an MCP directory does to it, which is the behaviour
+      # the release existed to fix.
+      - name: Smoke test the built image
+        env:
+          # Kept in step with the tests that pin the tool surface: the counts in
+          # test/e2e/introspection.e2e.test.ts (TOOL_COUNT) and
+          # test/e2e/http.e2e.test.ts, and the sorted name lists in
+          # test/e2e/tools.e2e.test.ts and test/unit/tools/registry.test.ts.
+          # Nothing links them, so adding a tool means editing all of them, and
+          # this is the one no local run catches: the whole suite went green with
+          # the image still expecting eleven, and again with it expecting 14.
+          TOOL_COUNT: '16'
+        run: |
+          set -euo pipefail
+          {
+            echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}'
+            echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+            echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"run-command","arguments":{"command":"echo hi"}}}'
+          } | timeout 60 docker run --rm -i ssh-mcp:ci > out.jsonl 2> err.txt || true
+
+          node -e '
+            const fs = require("fs");
+            const lines = fs.readFileSync("out.jsonl", "utf8").split("\n").filter(Boolean);
+            const err = fs.readFileSync("err.txt", "utf8");
+            const replies = lines.map((l) => JSON.parse(l));
+            const byId = (id) => replies.find((r) => r.id === id);
+            const fail = (m) => { console.error(`::error::${m}\n--- stderr ---\n${err}`); process.exit(1); };
+
+            const init = byId(1);
+            if (init?.result?.serverInfo?.name !== "SSH MCP Server") fail("no initialize reply from the image");
+
+            const tools = byId(2)?.result?.tools;
+            if (!Array.isArray(tools)) fail("no tools/list reply from the image");
+            const want = Number(process.env.TOOL_COUNT);
+            if (tools.length !== want) fail(`image listed ${tools.length} tools, expected ${want}`);
+
+            const call = byId(3)?.result;
+            if (call?.isError !== true) fail("unconfigured image did not refuse a tool call");
+            const text = JSON.stringify(call.content);
+            if (!/No config file found/.test(text)) fail(`refusal did not name the config path: ${text}`);
+
+            console.log(`image ok: ${tools.length} tools, tool call refused, warning on stderr: ${/starting unconfigured/.test(err)}`);
+          '
+
+      # The README says "non-root UID 65532". Asserted rather than trusted, because
+      # a base image change or a reordered COPY can silently drop the USER line's
+      # effect and nothing else here would notice.
+      - name: The image must not run as root
+        run: |
+          set -euo pipefail
+          uid="$(docker run --rm --entrypoint id ssh-mcp:ci -u)"
+          echo "container uid: $uid"
+          [ "$uid" = "65532" ] || { echo "::error::image runs as uid $uid, expected 65532" >&2; exit 1; }

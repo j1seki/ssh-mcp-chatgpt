@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { posix as pathPosix } from "node:path";
 import { Client, type ClientChannel, type SFTPWrapper } from "ssh2";
-import type { SSHConfig } from "./index.js";
+import type { SSHConfig } from "./legacy-stdio.js";
 import { withSshConnection } from "./ssh-connection-pool.js";
 
 const MAX_REMOTE_FILE_BYTES = 8 * 1024 * 1024;

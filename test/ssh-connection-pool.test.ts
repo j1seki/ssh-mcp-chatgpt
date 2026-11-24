@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
 import type { Client } from "ssh2";
-import type { SSHConfig } from "../src/index.js";
+import type { SSHConfig } from "../src/legacy-stdio.js";
 import { SshConnectionPool } from "../src/ssh-connection-pool.js";
 
 class FakeClient extends EventEmitter {

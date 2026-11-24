@@ -1,4 +1,4 @@
-// Added for testing purposes, requires docker compose to run
+// Start the fixture with docker compose --profile test up -d ssh.
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
@@ -6,9 +6,9 @@
       "type": "local",
       "command": [
         "node",
-        "build/index.js",
+        "build/legacy-stdio.js",
         "--host=127.0.0.1",
-        "--port=2222",
+        "--port=2228",
         "--user=test",
         "--password=secret",
         "--timeout=60000"

@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { healthPayload, invokeTool, listTools, loadRuntimeConfig } from '../src/chatgpt-http';
+import { healthPayload, invokeTool, listTools, loadRuntimeConfig } from '../src/chatgpt-http.js';
 
 const mockState = vi.hoisted(() => ({
   connectCalls: [] as any[],

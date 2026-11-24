@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { healthPayload, invokeTool, listTools, loadRuntimeConfig } from '../src/chatgpt-http';
+import { healthPayload, invokeTool, listTools, loadRuntimeConfig } from '../src/chatgpt-http.js';
+import { SERVER_VERSION } from '../src/version.js';
 
 const originalEnv = { ...process.env };
 
@@ -12,7 +13,7 @@ function restoreEnv() {
 
 function configureSshTarget() {
   process.env.SSH_MCP_HOST = process.env.SSH_HOST || '127.0.0.1';
-  process.env.SSH_MCP_PORT = process.env.SSH_PORT || '2222';
+  process.env.SSH_MCP_PORT = process.env.SSH_PORT || '2228';
   process.env.SSH_MCP_USER = process.env.SSH_USER || 'test';
   process.env.SSH_MCP_PASSWORD = process.env.SSH_PASSWORD || 'secret';
   process.env.SSH_MCP_DISABLE_SUDO = '1';
@@ -43,7 +44,7 @@ describe('ChatGPT HTTP background command tools', () => {
     expect(health.default_output_max_chars).toBe(100000);
     expect(health.default_expire_time_ms).toBe(55000);
     expect(health.default_kill_time_ms).toBe(600000);
-    expect(health.version).toBe('1.6.9-chatgpt.0');
+    expect(health.version).toBe(`${SERVER_VERSION}-chatgpt.0`);
     expect(toolNames).toEqual(expect.arrayContaining(['exec', 'exec-status', 'exec-cancel']));
   });
 

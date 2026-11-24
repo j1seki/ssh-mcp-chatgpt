@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { invokeTool, loadRuntimeConfig } from '../src/chatgpt-http';
+import { invokeTool, loadRuntimeConfig } from '../src/chatgpt-http.js';
 
 const mockState = vi.hoisted(() => ({
   commands: [] as string[],

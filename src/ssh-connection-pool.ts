@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Client } from "ssh2";
-import type { SSHConfig } from "./index.js";
+import type { SSHConfig } from "./legacy-stdio.js";
 
 interface PoolEntry {
   client: Client;

@@ -7,7 +7,7 @@ import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Serv
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Client, type ClientChannel } from "ssh2";
-import type { SSHConfig } from "./index.js";
+import type { SSHConfig } from "./legacy-stdio.js";
 import {
   acquireSshConnection,
   sshConnectionPool,
@@ -24,12 +24,13 @@ import {
   type RemoteToolContext,
   type ScriptInterpreter,
 } from "./remote-tools.js";
+import { SERVER_VERSION as PACKAGE_VERSION } from "./version.js";
 
 type JsonRpcId = string | number | null;
 type JsonObject = Record<string, unknown>;
 
 const SERVER_NAME = "ssh-mcp-chatgpt";
-const SERVER_VERSION = "1.6.9-chatgpt.0";
+const SERVER_VERSION = `${PACKAGE_VERSION}-chatgpt.0`;
 const STREAMABLE_HTTP_ACCEPT = "application/json, text/event-stream";
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const CODE_TTL_MS = 5 * 60 * 1000;

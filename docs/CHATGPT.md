@@ -70,7 +70,7 @@ npm run start:http
 Docker:
 
 ```bash
-docker build -t ssh-mcp-chatgpt .
+docker build -f Dockerfile.chatgpt -t ssh-mcp-chatgpt .
 docker run -d --restart unless-stopped --name ssh-mcp-chatgpt \
   --env-file /path/to/ssh-mcp-chatgpt.env \
   -v /srv/ssh-mcp-chatgpt/data:/srv/ssh-mcp-chatgpt/data \

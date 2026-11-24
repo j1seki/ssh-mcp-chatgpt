@@ -1,0 +1,109 @@
+version: 2
+
+# Grouped and monthly on purpose. The objection to enabling this was a stream of
+# individual pull requests, each needing its own triage — so everything below
+# collapses into at most three PRs a month, split along the line that decides how
+# much care each one needs.
+updates:
+  # The counterpart to pinning every action to a commit SHA. Pinned refs do not
+  # move on their own, and codeql-action is the sharpest case: GitHub ages out old
+  # CodeQL bundles, so a stale pin first warns and then degrades. Dependabot
+  # understands the `@<sha> # <tag>` convention and rewrites both parts.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    # Do not propose a version until it has been public for a week. Malicious
+    # releases are typically caught and yanked within days, and nothing here is
+    # urgent enough to want the first hour of a new tag. Security advisories
+    # bypass this — Dependabot security updates are a separate feed.
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+
+  # One entry, because Dependabot requires a unique ecosystem+directory pair —
+  # but two groups, so production and development arrive as separate pull
+  # requests. That split is the point: a production bump changes what
+  # `npm i ssh-mcp` resolves and needs a changeset and a release, while a dev bump
+  # reaches nothing published (`files` is `build` only) and needs neither.
+  # Batching them together would mean making that call by accident.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    versioning-strategy: increase-if-necessary
+    cooldown:
+      default-days: 7
+    groups:
+      production:
+        dependency-type: production
+        update-types: [minor, patch]
+      development:
+        dependency-type: development
+    # Majors on the SSH and MCP libraries are not batch work: these are where a
+    # silent behaviour change surfaces as a security regression rather than as a
+    # failing test, so they want a human opening the diff.
+    #
+    # TypeScript is here for a different reason, and it is the one the grouping
+    # above got wrong: `prepare` runs `tsc`, and `files` is `build`, so the
+    # compiler is the only development dependency that decides what bytes get
+    # published. A compiler major changes the emit, which no test in this repo
+    # asserts on. It arrived once inside a "development group" batch of eight
+    # (#100) where nothing about the title suggested the published artifact was
+    # in scope.
+    ignore:
+      - dependency-name: ssh2
+        update-types: [version-update:semver-major]
+      - dependency-name: '@modelcontextprotocol/sdk'
+        update-types: [version-update:semver-major]
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
+    commit-message:
+      prefix: fix
+      prefix-development: chore
+
+  # Two entries, because Dependabot treats these as separate ecosystems: `docker`
+  # reads Dockerfiles, `docker-compose` reads compose files. Declaring only the
+  # first would leave the four sshd digests in docker-compose.yml — the pins that
+  # matter most, since those containers decide whether the SSH tests are honest —
+  # frozen with nothing to refresh them.
+  #
+  # Pinning without an updater is how a fixture quietly ends up years old. Both
+  # rewrite the digest and leave the readable tag beside it.
+  # .oss-scanner/Dockerfile pins the same way, for the OSS Scanner's image.
+  - package-ecosystem: docker
+    directories: [/, /.oss-scanner]
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      containers:
+        patterns: ['*']
+    # Node majors are a human decision, not a batch one. Dependabot proposed
+    # 22-slim -> 25-slim, and odd-numbered Node releases are Current rather than
+    # LTS: roughly six months of support instead of three years. Choosing the
+    # runtime an SSH access server runs on is not something to accept from a
+    # grouped bump — minors and patches still flow.
+    ignore:
+      - dependency-name: node
+        update-types: [version-update:semver-major]
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      containers:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
