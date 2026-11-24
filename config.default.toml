@@ -98,7 +98,6 @@ auth = "keychain"
 keychainEntry = "ssh-mcp/db-observer"
 role = "viewer"
 readOnly = true
-approvalPolicy = "auto"
 
 # Optional. Merged over the built-in role matrix, keyed by role then host group.
 # Uncomment to grant sudo on hosts you have labelled prod, rather than
