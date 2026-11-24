@@ -46,10 +46,10 @@ describe('boolean flags reach their call sites', () => {
    * but that the flags are wired through it. A unit test of the helper alone
    * would have passed against the broken code.
    */
-  it('--insecureHostKey selects insecure mode when written bare', () => {
-    expect(resolveHostKeyMode({ insecureHostKey: null })).toBe('insecure');
+  it('refuses attempts to disable host-key verification', () => {
+    expect(() => resolveHostKeyMode({ insecureHostKey: null })).toThrow(/requires host-key verification/);
+    expect(() => resolveHostKeyMode({ hostKeyMode: 'insecure' })).toThrow(/requires host-key verification/);
     expect(resolveHostKeyMode({})).toBe('tofu');
-    // And can be turned back off, unlike before.
     expect(resolveHostKeyMode({ insecureHostKey: 'false' })).toBe('tofu');
   });
 });

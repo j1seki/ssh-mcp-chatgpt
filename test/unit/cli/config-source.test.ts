@@ -36,7 +36,7 @@ describe('loadAppConfig tags the config with its source', () => {
     const { loader, loadAppConfig, parse } = await withMockedLoader((E) => vi.fn(async () => {
       throw new E.ConfigNotFoundError('/nowhere/config.toml');
     }));
-    const loaded = await loadAppConfig({ host: 'example.com', user: 'deploy' });
+    const loaded = await loadAppConfig({ host: 'example.com', user: 'deploy', group: 'dev' });
     // The real loader also answers ConfigNotFoundError on a machine with no config, so
     // this is what proves the mock was the one asked.
     expect(parse).toHaveBeenCalledTimes(1);
@@ -44,6 +44,7 @@ describe('loadAppConfig tags the config with its source', () => {
     expect(loaded.path).toBe(loader.getConfigPath());
     expect(loaded.sha256).toBeNull();
     expect(loaded.config.profiles[0].host).toBe('example.com');
+    expect(loaded.config.profiles[0]).toMatchObject({ role: 'operator', approvalPolicy: 'ask-destructive' });
   });
 
   it('reports nothing configured as source unconfigured with no profiles', async () => {

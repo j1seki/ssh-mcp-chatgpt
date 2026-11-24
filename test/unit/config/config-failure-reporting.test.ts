@@ -53,6 +53,12 @@ describe('loadConfigWithDigest distinguishes "absent" from "unusable"', () => {
     await expect(loadConfigWithDigest(path)).rejects.toThrow(/Failed to parse TOML/);
   });
 
+  it('reports a malformed credential line without including its contents', async () => {
+    const path = await cfg.write('password = "synthetic-fixture-value" invalid\n');
+    await expect(loadConfigWithDigest(path)).rejects.toThrow(/line 1/);
+    await expect(loadConfigWithDigest(path)).rejects.not.toThrow(/synthetic-fixture-value/);
+  });
+
   it('does not report a schema violation as not-found', async () => {
     const path = await cfg.write('[defaults]\ndefaultProfile = "dev"\n');
     await expect(loadConfigWithDigest(path)).rejects.not.toBeInstanceOf(ConfigNotFoundError);

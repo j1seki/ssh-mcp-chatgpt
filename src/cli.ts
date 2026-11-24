@@ -313,17 +313,14 @@ export function parseOpaUrl(raw: string | null | undefined): string {
   return (parsed.origin + parsed.pathname).replace(/\/$/, '');
 }
 
-/**
- * `strict` was previously unreachable: nothing but test code could select it,
- * yet host-key.ts pointed users at a `--acceptNewHostKey` flag that never
- * existed. `--insecureHostKey` is kept as an alias for the documented flag.
- */
 export function resolveHostKeyMode(argv: Argv): HostKeyMode {
-  if (flagEnabled(argv, 'insecureHostKey')) return 'insecure';
   const mode = argv.hostKeyMode;
-  if (mode === null || mode === undefined) return 'tofu';
-  if (mode === 'tofu' || mode === 'strict' || mode === 'insecure') return mode;
-  throw new OperatorError(`Invalid --hostKeyMode=${mode}. Expected one of: tofu, strict, insecure.`);
+  if (flagEnabled(argv, 'insecureHostKey') || mode === 'insecure') {
+    throw new OperatorError('SSH Gateway requires host-key verification. Set trustedHostKey on each profile or use --hostKeyMode=tofu for a trusted first connection.');
+  }
+  if (mode === null || mode === undefined) return argv.transport === 'http' ? 'strict' : 'tofu';
+  if (mode === 'tofu' || mode === 'strict') return mode;
+  throw new OperatorError(`Invalid --hostKeyMode=${mode}. Expected one of: tofu, strict.`);
 }
 
 /** What `parseStartupFlags` hands to `main()`: the checked flags, absent where unused. */
@@ -531,7 +528,7 @@ export async function loadAppConfig(
     maxChars: defaults.commandMaxChars,
     maxOutputBytes: defaults.commandMaxOutputBytes,
     outputTruncation: defaults.commandOutputTruncation,
-    role: 'admin',
+    role: 'operator',
     group: resolveHostGroup(argv),
     readOnly: false,
     // Same default as the config schema. A CLI profile is the one-off case —

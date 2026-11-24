@@ -113,7 +113,7 @@ export async function startE2E(opts: StartOptions = {}): Promise<E2EClient & { c
 
   const transport = new StdioClientTransport({
     command: 'node',
-    args: [SERVER_ENTRY, `--config=${configPath}`, '--insecureHostKey', ...(opts.args ?? [])],
+    args: [SERVER_ENTRY, `--config=${configPath}`, ...(opts.args ?? [])],
     cwd: REPO_ROOT,
     env: {
       ...parentEnv,

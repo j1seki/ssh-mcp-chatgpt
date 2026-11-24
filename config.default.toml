@@ -44,16 +44,16 @@ transferTimeoutMs = 300000         # 5min with *no bytes moving*, not a total
                                    #   budget: a slow large transfer survives,
                                    #   a stalled channel still fails fast
 
-# Development server — permissive
+# Development server
 [[profiles]]
 name = "dev"
 host = "localhost"
 port = 2222
 user = "developer"
 auth = "agent"                    # agent | key | password | keychain
-role = "admin"
+role = "operator"
 readOnly = false
-approvalPolicy = "auto"           # dev is permissive
+approvalPolicy = "ask-destructive"
 
 # Production web server — strict
 [[profiles]]

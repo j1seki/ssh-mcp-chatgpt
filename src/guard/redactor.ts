@@ -113,6 +113,16 @@ export interface RedactOptions {
   literalSecrets?: string[];
 }
 
+export function redactLiteralSecrets(text: string, secrets: readonly (string | undefined)[]): string {
+  let result = text;
+  for (const secret of secrets) {
+    if (secret && secret.length >= 4) {
+      result = result.split(secret).join(`[REDACTED:secret:${secret.length}]`);
+    }
+  }
+  return result;
+}
+
 export function redactText(text: string, opts: RedactOptions = {}): string {
   let result = text;
 
@@ -132,11 +142,7 @@ export function redactText(text: string, opts: RedactOptions = {}): string {
     });
   }
 
-  for (const secret of opts.literalSecrets ?? []) {
-    if (secret && secret.length >= 4) {
-      result = result.split(secret).join(`[REDACTED:secret:${secret.length}]`);
-    }
-  }
+  result = redactLiteralSecrets(result, opts.literalSecrets ?? []);
 
   // Last: masking an assignment's value before the literal layer would hide
   // the only findable copy of a configured secret and spare prose mentions.

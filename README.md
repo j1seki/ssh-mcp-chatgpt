@@ -11,7 +11,7 @@
 
 **SSH MCP Server** is a security-first Model Context Protocol server that gives LLM agents controlled SSH access to remote hosts — with command classification, policy-based authorization, human-in-the-loop approval, and full audit logging.
 
-This fork also ships the [ChatGPT connector with OAuth and JSON SSH profiles](docs/chatgpt-guide.md). Run it with `npm run start:http` after building from source, or build its image with `docker build -f Dockerfile.chatgpt -t ssh-mcp-chatgpt .`. The `ssh-mcp` command and default Dockerfile run upstream v2. Existing stdio clients that use the `exec` and `sudo-exec` tools can use `ssh-mcp-legacy` with their existing flags. The v2 policy engine applies to the v2 entry point. The ChatGPT connector continues to use its own tool and SSH profile configuration.
+This SSH Gateway branch uses the upstream v2 core for stdio and bearer-authenticated HTTP. The [project roadmap](docs/ssh-gateway/roadmap.md) tracks the ChatGPT OAuth integration and self-hosted release.
 
 > **The risk this server exists to manage.** Giving an LLM shell access on a remote host puts private data, untrusted input and network egress in one place — Simon Willison's ["lethal trifecta"](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/). Prompt injection has no general fix, so ssh-mcp assumes any command may be attacker-influenced: it classifies before executing, authorizes against a role × host-group matrix, gates destructive work behind approval, and records the decision either way. That narrows the blast radius; it does not remove the risk. Two things stay yours: **never point it at a root account**, and **never set `auto` approval on a production profile**. [SECURITY.md](./SECURITY.md) has the full threat model.
 
@@ -22,7 +22,9 @@ This fork also ships the [ChatGPT connector with OAuth and JSON SSH profiles](do
 ### 1. Install
 
 ```bash
-npm install -g ssh-mcp
+npm ci
+npm run build
+npm link
 ```
 
 ### 2. Configure
@@ -54,8 +56,8 @@ port = 22
 user = "deploy"           # NOT root!
 auth = "key"
 keyRef = "~/.ssh/id_ed25519"
-role = "admin"
-approvalPolicy = "auto"    # dev is permissive
+role = "operator"
+approvalPolicy = "ask-destructive"
 ```
 
 ```bash
@@ -592,20 +594,9 @@ without it the tier is guessed from the profile name (`prod`/`staging`/`dev`,
 the strictest tier. A production host named `web-01` is therefore treated as
 production rather than silently getting dev permissions.
 
-Note what this means for `sudo`: **`admin` has no `privileged` on `prod`**, so
-`privileged-command` is refused there by design — including on a quick-start
-profile, which has no name to infer from and therefore lands on `prod`. If the
-host is not production, say so:
-
-```bash
-npx ssh-mcp --host=10.0.0.5 --user=deploy --group=dev
-```
-
-```toml
-[[profiles]]
-name = "build-box"
-group = "dev"
-```
+The quick-start profile uses the `operator` role and defaults to `prod`.
+Changing its group does not grant sudo. To allow `privileged-command`, configure
+a named profile whose role and host group permit the `privileged` class.
 
 ### Configuring the matrix
 
@@ -1022,13 +1013,13 @@ ssh-mcp --config=/path/to.toml   # custom config path
 For remote/web clients behind a reverse proxy with TLS:
 
 ```bash
-ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret
-ssh-mcp --transport=http --httpPort=3000 --bearerToken=secret --rateLimit=60
+# Supply SSH_MCP_HTTP_TOKEN from your environment or secret manager.
+ssh-mcp --transport=http --httpPort=3000 --rateLimit=60
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--bearerToken` | required | Bearer token for authentication (all routes except `GET /health`) |
+| `--bearerToken` | `SSH_MCP_HTTP_TOKEN` | Bearer token for authentication (all routes except `GET /health`). Use the environment to keep the token out of process arguments. |
 | `--httpPort` | 3000 | HTTP listen port |
 | `--httpHost` | 127.0.0.1 | Bind address |
 | `--rateLimit` | 0 (off) | Max authenticated requests per minute, per client (0 = unlimited) |
@@ -1130,15 +1121,15 @@ Secrets are **never** passed as CLI arguments. A flag not in this table is refus
 | `--transport` | stdio | `stdio` or `http` |
 | `--httpPort` | 3000 | HTTP transport port |
 | `--httpHost` | 127.0.0.1 | HTTP bind address |
-| `--bearerToken` | — | Bearer token for HTTP transport auth (required for `--transport=http`) |
+| `--bearerToken` | `SSH_MCP_HTTP_TOKEN` | Explicit bearer token override for HTTP transport auth |
 | `--rateLimit` | 0 | Max authenticated requests per minute, per client (0 = unlimited) |
 | `--httpSessionTtl` | 1800000 | Idle timeout of an MCP client session over HTTP, in ms (a session with a request in flight or an open SSE stream does not expire). At the 64-session cap a new client evicts the least recently active session with no request in flight, one holding an SSE stream only when no other can go |
 | `--authFailureLimit` | 10 | Failed bearer-auth attempts allowed per client per minute (0 = off) |
 | `--trustProxy` | false | Read the client address from `X-Forwarded-For`, but only when the peer is the proxy — bare means a loopback peer |
 | `--trustedProxies` | — | Comma-separated peer addresses allowed to send `X-Forwarded-For`. Empty means loopback only |
 | `--allowedHosts` | bind address + localhost | Comma-separated Host headers accepted by the DNS-rebinding guard |
-| `--hostKeyMode` | `tofu` | `tofu \| strict \| insecure`. `strict` accepts only hosts pinned with `trustedHostKey`. See [SECURITY.md](./SECURITY.md#host-key-trust-does-not-survive-a-restart) |
-| `--insecureHostKey` | false | Disable host key verification for hosts with no `trustedHostKey` — a pin still refuses (test only!) |
+| `--hostKeyMode` | `tofu` for stdio, `strict` for HTTP | `tofu \| strict`. `strict` requires a matching `trustedHostKey` on each profile. |
+| `--insecureHostKey` | false | Retired. The gateway refuses attempts to disable verification. |
 | `--allowUncheckedConfigAcl` | false | Windows: report every ACL finding and refuse none |
 | `--strictConfigAcl` | false | Windows: refuse on every ACL finding, including a read-only over-grant |
 | `--disableApproval` | false | Skip the approval gate (quick start profile only) |
@@ -1159,6 +1150,12 @@ Secrets are **never** passed as CLI arguments. A flag not in this table is refus
 
 v2 is a breaking release. Passing a removed flag now fails at startup with the
 replacement, rather than failing later as a confusing auth error.
+
+For the former ChatGPT fork, move JSON profiles and credential references to v2 TOML.
+Use the [migration mapping](docs/ssh-gateway/phase-1-audit.md#migration-plan) for the
+old HTTP tools. Run the gateway as a non-root account. Command-line quick-start
+profiles use the `operator` role. For privileged access, configure a named profile
+and a role binding that explicitly permits the `privileged` class.
 
 ### Tools
 
@@ -1206,14 +1203,14 @@ and pass `--config <path>`; profiles carry per-host roles and approval policy.
 
 ### Host key verification
 
-v1 did not verify host keys. v2 defaults to trust-on-first-use and records the
+The stdio transport defaults to trust on first use and records the
 key **in memory, for the life of the process**; a later mismatch in that same
 process fails the connection. Nothing is written to disk and `~/.ssh/known_hosts`
 is not consulted, so a restart accepts afresh — see
 [SECURITY.md](./SECURITY.md#host-key-trust-does-not-survive-a-restart). Pin
-explicitly with `trustedHostKey` in a profile, which is the only control here that
-survives a restart — and which no host key mode overrides, so `--insecureHostKey`
-is an opt-out only for hosts you have not pinned (test environments only).
+explicitly with `trustedHostKey` in every relevant profile, including bastions.
+Pins are honored across restarts. HTTP requires pins by default. Confirm the
+fingerprint with the SSH host operator before configuring each pin.
 
 ---
 

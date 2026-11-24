@@ -187,7 +187,7 @@ export function registerSessionTools(
         return textResult(`Background session "${name}" not found.`);
       }
       if (session instanceof BackgroundSession) {
-        return textResult(redactText(session.readOutput(lines), { entropyScan: true }));
+        return textResult(redactText(conn.redactCredentials(session.readOutput(lines)), { entropyScan: true }));
       }
       return textResult(`Session "${name}" is not a background session.`);
     },

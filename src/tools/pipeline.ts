@@ -11,6 +11,7 @@ import { formatReadOnlyRejection } from '../policy/classifier.js';
 import type { LocalPathContext } from './local-path.js';
 import type { ConfigReloader } from '../config/reload.js';
 import { ApprovalGrants } from '../guard/approval-grants.js';
+import type { SSHConnection } from '../ssh/connection.js';
 import type { CommandResult, ToolContext, PolicyEvaluation, CommandClass } from '../types.js';
 
 /**
@@ -167,7 +168,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
       const evaluation = await policy.evaluateWithOpa(command, conn.profile, toolName, resource);
       span.setAttribute('policy.decision', evaluation.decision);
       span.setAttribute('command.class', evaluation.commandClass);
-      span.setAttribute('command.binary', evaluation.binary);
+      span.setAttribute('command.binary', conn.redactCredentials(evaluation.binary));
 
       if (evaluation.decision === 'deny') {
         throw new PolicyRefusedError(
@@ -203,6 +204,12 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
       }
 
       if (evaluation.decision === 'require-approval') {
+        if (conn.redactCredentials(command) !== command) {
+          throw new PolicyRefusedError(
+            'CREDENTIAL_IN_APPROVAL: Remove the configured credential from the operation before requesting approval.',
+            { ...evaluation, decision: 'deny', ruleId: 'credential-in-approval' },
+          );
+        }
         // A live grant from an earlier explicit approval of this exact command.
         if (grants.has(conn.profile.name, command, evaluation.commandClass)) {
           span.setAttribute('policy.grant', 'reused');
@@ -330,7 +337,9 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     evaluation: PolicyEvaluation,
     result: CommandResult | { error: string },
     approver?: string,
+    conn = registry.get(profileName),
   ) {
+    const error = 'error' in result ? result.error : undefined;
     await audit.record({
       mcpRequestId: ctx.requestId,
       profile: profileName,
@@ -340,14 +349,14 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
       // swallows that by design. The record the operator most needs was the one record that
       // could not be written.
       user: profileUser(profileName),
-      command,
+      command: conn?.redactCredentials(command) ?? command,
       commandClass: evaluation.commandClass,
-      binary: evaluation.binary,
+      binary: conn?.redactCredentials(evaluation.binary) ?? evaluation.binary,
       decision: evaluation.decision,
       ruleId: evaluation.ruleId,
       exitCode: 'exitCode' in result ? result.exitCode : undefined,
       durationMs: 'durationMs' in result ? result.durationMs : undefined,
-      error: 'error' in result ? result.error : undefined,
+      error: error === undefined ? undefined : conn?.redactCredentials(error) ?? error,
       approver,
     });
   }
@@ -479,6 +488,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     // the first statement inside, so the quota key and the audit record are unchanged on
     // every path that gets that far.
     let profileName = opts.profile ?? '(default)';
+    let connection: SSHConnection | undefined;
 
     // Profile resolution and sanitization both run inside the try, so a rejected call
     // still leaves an audit trail — a client probing with malformed payloads, or probing
@@ -501,6 +511,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
       const { conn, evaluation, approver } = await checkPolicyAndApprove(
         effective, profileName, opts.toolName, opts.resource, opts.synthetic ?? false,
       );
+      connection = conn;
       state.evaluation = evaluation;
 
       if (opts.enforceClass && evaluation.commandClass !== opts.enforceClass) {
@@ -549,10 +560,16 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
       // `state.command`, not `effective`: identical unless the handler refined
       // it, and the refinement is exactly what the success record should carry.
       // The failure path below already reads `state`, so the two agree.
-      await auditResult(ctx, profileName, state.command, evaluation, audited, approver);
-      return output;
+      await auditResult(ctx, profileName, state.command, evaluation, audited, approver, conn);
+      return {
+        ...output,
+        content: output.content.map((item) => ({ ...item, text: conn.redactCredentials(item.text) })),
+      };
     } catch (err: any) {
       await auditFailure(ctx, profileName, state, opts.failureClass, err);
+      const message = err instanceof Error ? err.message : String(err);
+      const sanitized = (connection ?? registry.get(profileName))?.redactCredentials(message) ?? message;
+      if (sanitized !== message) throw new Error(sanitized);
       throw err;
     }
   }
@@ -565,12 +582,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
         onProgress: rt.onProgress,
         abortSignal: rt.abortSignal,
       });
-      // The sudo password is the one secret that can plausibly end up in this
-      // output (GHSA-9m75-x2ch-j4jr): it is written onto the very channel the
-      // command reads. Scrub it here whatever the exec path was.
-      const sudoPassword = rt.conn.getSudoPassword?.();
-      const literalSecrets = sudoPassword ? [sudoPassword] : undefined;
-      return { audited, output: commandOutput(audited, { literalSecrets }) };
+      return { audited, output: commandOutput(audited) };
     };
   }
 

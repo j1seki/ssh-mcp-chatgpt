@@ -6,13 +6,13 @@
   "mcpName": "io.github.tufantunc/ssh-mcp",
   "type": "module",
   "bin": {
-    "ssh-mcp": "build/index.js",
-    "ssh-mcp-legacy": "build/legacy-stdio.js"
+    "ssh-mcp": "build/index.js"
   },
   "scripts": {
     "prepare": "npm run build",
-    "build": "tsc && shx chmod +x build/*.js",
-    "build:coverage": "tsc --sourceMap && shx chmod +x build/*.js",
+    "clean": "node -e \"require('node:fs').rmSync('build', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc && shx chmod +x build/*.js",
+    "build:coverage": "npm run clean && tsc --sourceMap && shx chmod +x build/*.js",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "inspect": "npx @modelcontextprotocol/inspector node build/index.js",
     "changeset": "changeset",
@@ -23,9 +23,7 @@
     "test:watch": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest",
     "coverage": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run --coverage",
     "coverage:unit": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run --coverage test/unit/ test/property/",
-    "test:e2e": "npm run build && cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run test/e2e/",
-    "start:http": "node build/chatgpt-http.js",
-    "dev:http": "tsx src/chatgpt-http.ts"
+    "test:e2e": "npm run build && cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run test/e2e/"
   },
   "files": [
     "build"
@@ -51,7 +49,6 @@
     "cross-env": "^10.1.0",
     "fast-check": "^4.9.0",
     "shx": "^0.4.0",
-    "tsx": "^4.20.6",
     "typescript": "^5.9.2",
     "vitest": "^5.0.5"
   },

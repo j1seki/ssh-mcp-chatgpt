@@ -54,6 +54,11 @@ describe('parseStartupFlags', () => {
   });
 
   describe('HTTP', () => {
+    it('defaults to strict host-key verification', () => {
+      expect(parseStartupFlags({ transport: 'http' }).hostKeyMode).toBe('strict');
+      expect(parseStartupFlags({ transport: 'http', hostKeyMode: 'tofu' }).hostKeyMode).toBe('tofu');
+    });
+
     it('parses --httpSessionTtl and --authFailureLimit under --transport=http', () => {
       expect(parseStartupFlags({ transport: 'http', httpSessionTtl: '60000', authFailureLimit: '0' }).http)
         .toEqual({ sessionIdleTtlMs: 60000, authFailureLimit: 0 });

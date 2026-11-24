@@ -5,22 +5,13 @@ import { mkdtemp, rm, readFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SSHConnection } from '../../src/ssh/connection.js';
+import { shellSingleQuote } from '../../src/guard/sanitizer.js';
 import { resolveCredentials } from '../../src/config/credential-resolver.js';
 import { isSshServerUp, assertAvailable, SSH_HOST } from './helpers.js';
 import { PORTS, profiles } from './fixtures.js';
 import type { Profile } from '../../src/types.js';
 
 const run = promisify(execFile);
-
-// Ask compose for the container rather than hard-coding a name: the project
-// prefix comes from the checkout directory, which is not the same everywhere
-// the suite runs.
-async function adminContainerId(): Promise<string> {
-  const { stdout } = await run('docker', ['compose', 'ps', '-q', 'ssh-admin']);
-  const id = stdout.trim().split('\n')[0];
-  if (!id) throw new Error('ssh-admin container not found via docker compose ps');
-  return id;
-}
 
 /**
  * Two capabilities that shipped without a test behind them, both of them the
@@ -67,6 +58,8 @@ describe.skipIf(!up)('PTY allocation', () => {
 describe.skipIf(!up)('encrypted private key', () => {
   let dir: string;
   let conn: SSHConnection | undefined;
+  let provisioner: SSHConnection | undefined;
+  let publicKey: string | undefined;
   let savedEnv: NodeJS.ProcessEnv;
   const PASSPHRASE = 'test-passphrase-2026';
 
@@ -79,14 +72,17 @@ describe.skipIf(!up)('encrypted private key', () => {
     await run('ssh-keygen', ['-t', 'ed25519', '-N', PASSPHRASE, '-f', keyPath, '-C', 'ssh-mcp-test', '-q']);
     const pub = (await readFile(`${keyPath}.pub`, 'utf8')).trim();
 
-    // The admin account's home is /config in this image, and sshd refuses a
-    // key file it does not own.
-    await run('docker', [
-      'exec', await adminContainerId(), 'sh', '-c',
-      `mkdir -p /config/.ssh && echo '${pub}' >> /config/.ssh/authorized_keys ` +
-      `&& chown -R admin /config/.ssh && chmod 700 /config/.ssh ` +
-      `&& chmod 600 /config/.ssh/authorized_keys`,
-    ]);
+    // Provision via the fixture account to keep this test independent of
+    // the container runtime and the account's home directory.
+    provisioner = new SSHConnection(profiles.admin, { password: 'secret' }, new Map(), 'tofu');
+    const install = await provisioner.exec(
+      'umask 077; mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh" && ' +
+      'touch "$HOME/.ssh/authorized_keys" && chmod 600 "$HOME/.ssh/authorized_keys" && ' +
+      'cat >> "$HOME/.ssh/authorized_keys"',
+      { stdin: `${pub}\n` },
+    );
+    expect(install.exitCode, 'install the fixture public key').toBe(0);
+    publicKey = pub;
 
     process.env.SSH_MCP_ADMIN_KEY = keyPath;
     process.env.SSH_MCP_ADMIN_PASSPHRASE = PASSPHRASE;
@@ -94,9 +90,20 @@ describe.skipIf(!up)('encrypted private key', () => {
   }, 60000);
 
   afterAll(async () => {
-    await conn?.close();
-    if (dir) await rm(dir, { recursive: true, force: true });
-    if (savedEnv) process.env = savedEnv;
+    try {
+      if (publicKey && provisioner) {
+        const remove = await provisioner.exec(
+          'f="$HOME/.ssh/authorized_keys"; tmp=$(mktemp "$HOME/.ssh/test-keys.XXXXXX") || exit 1; ' +
+          `grep -Fvx -- ${shellSingleQuote(publicKey)} "$f" > "$tmp"; status=$?; ` +
+          'if [ "$status" -le 1 ]; then mv "$tmp" "$f"; else rm "$tmp"; exit "$status"; fi',
+        );
+        expect(remove.exitCode, 'remove the fixture public key').toBe(0);
+      }
+    } finally {
+      await Promise.all([conn?.close(), provisioner?.close()]);
+      if (dir) await rm(dir, { recursive: true, force: true });
+      if (savedEnv) process.env = savedEnv;
+    }
   });
 
   it('authenticates with the passphrase supplied out of band', async () => {

@@ -224,6 +224,23 @@ describe('output redaction', () => {
     const res = await call('read-command', { command: 'env' });
     expect(textOf(res)).not.toContain('wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY');
   });
+
+  it('redacts a configured credential in results and audit records', async () => {
+    h = await createHarness();
+    const res = await call('run-command', { command: 'echo sudo-secret' });
+    expect(textOf(res)).toContain('[REDACTED:secret:11]');
+    expect(textOf(res)).not.toContain('sudo-secret');
+    expect(h.auditRecords.at(-1).command).toBe('echo [REDACTED:secret:11]');
+  });
+
+  it('refuses to send a configured credential in an approval prompt', async () => {
+    h = await createHarness({ approvalPolicy: 'ask-all' });
+    const res = await call('run-command', { command: 'echo sudo-secret' });
+    expect(textOf(res)).toContain('CREDENTIAL_IN_APPROVAL');
+    expect(h.approvalPrompts()).toBe(0);
+    expect(h.execCalls).toHaveLength(0);
+    expect(JSON.stringify(h.auditRecords)).not.toContain('sudo-secret');
+  });
 });
 
 describe('audit records', () => {

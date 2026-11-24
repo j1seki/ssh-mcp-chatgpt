@@ -10,6 +10,7 @@ import type { CloseOutcome } from '../../../src/ssh/session.js';
 import { ConnectionRegistry } from '../../../src/ssh/connection-registry.js';
 import { defaultsFromArgv } from '../../../src/cli.js';
 import type { ToolDeps } from '../../../src/tools/pipeline.js';
+import { redactLiteralSecrets } from '../../../src/guard/redactor.js';
 import { makeProfile } from '../../fixtures/profile.js';
 
 /**
@@ -87,6 +88,7 @@ export async function createHarness(
       return makeResult(command);
     },
     getSudoPassword: () => 'sudo-secret',
+    redactCredentials: (value: string) => redactLiteralSecrets(value, ['sudo-secret']),
     getSession: (name: string) => sessions.get(name),
     // Matches SSHConnection.listSessions(): Session objects, not SessionInfo —
     // the handler calls toInfo() itself.

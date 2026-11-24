@@ -103,7 +103,7 @@ jobs:
 
       - name: Wait for all sshd servers
         run: |
-          for port in 2222 2223 2224 2225 2226 2227 2228; do
+          for port in 2222 2223 2224 2225 2226 2227; do
             ready=false
             for i in $(seq 1 60); do
               if nc -z 127.0.0.1 $port; then echo "sshd on $port ready"; ready=true; break; fi

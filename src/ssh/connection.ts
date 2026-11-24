@@ -6,7 +6,7 @@ import type { Session, CloseOutcome } from './session.js';
 import { SessionManager } from './session-manager.js';
 import type { Span } from '@opentelemetry/api';
 import { tracer } from '../observability/tracer.js';
-import { redactText } from '../guard/redactor.js';
+import { redactLiteralSecrets, redactText } from '../guard/redactor.js';
 import { shellSingleQuote } from '../guard/sanitizer.js';
 import { openWithRetry } from './channel-retry.js';
 import { terminateChannel, COULD_NOT_SIGNAL } from './channel-signal.js';
@@ -288,7 +288,7 @@ export class SSHConnection {
       client.on('error', (err: Error) => {
         settle(() => {
           if (isCurrent()) this.client = null;
-          reject(new Error(`SSH connection error: ${err.message}`));
+          reject(new Error(`SSH connection error: ${this.redactCredentials(err.message)}`));
         });
       });
 
@@ -372,6 +372,11 @@ export class SSHConnection {
     return this.credentials.sudoPassword;
   }
 
+  redactCredentials(text: string): string {
+    const { password, sudoPassword, passphrase, privateKey } = this.credentials;
+    return redactLiteralSecrets(text, [password, sudoPassword, passphrase, privateKey?.trim()]);
+  }
+
   /**
    * Prefix a command with the profile's working directory, if configured.
    * Applied here rather than at the tool layer so the string the policy engine
@@ -391,7 +396,7 @@ export class SSHConnection {
     const span = tracer.startSpan('ssh.exec');
     span.setAttribute('ssh.host', this.profile.host);
     span.setAttribute('ssh.port', this.profile.port);
-    span.setAttribute('ssh.command', redactText(command));
+    span.setAttribute('ssh.command', redactText(this.redactCredentials(command)));
 
     return new Promise((resolve, reject) => {
       let activeStream: ClientChannel | null = null;
@@ -513,7 +518,7 @@ export class SSHConnection {
               if (idx < 0) break;
               tail = tail.substring(idx + 1);
             }
-            opts.onProgress(received, redactText(tail.trim(), { entropyScan: true }));
+            opts.onProgress(received, redactText(this.redactCredentials(tail.trim()), { entropyScan: true }));
           }
         });
         stream.stderr.on('data', (data: Buffer) => {

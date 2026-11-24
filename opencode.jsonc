@@ -1,4 +1,4 @@
-// Start the fixture with docker compose --profile test up -d ssh.
+// Uses the upstream TOML configuration in the operator's default config directory.
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
@@ -6,12 +6,7 @@
       "type": "local",
       "command": [
         "node",
-        "build/legacy-stdio.js",
-        "--host=127.0.0.1",
-        "--port=2228",
-        "--user=test",
-        "--password=secret",
-        "--timeout=60000"
+        "build/index.js"
       ],
       "enabled": true,
     },

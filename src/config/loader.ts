@@ -126,12 +126,14 @@ export async function loadConfigWithDigest(
   let parsed: unknown;
   try {
     parsed = parseTOML(raw);
-  } catch (err: any) {
-    throw new ConfigParseError(
-      `Failed to parse TOML config at ${configPath}: ${err.message}`,
-      typeof err?.line === 'number' ? err.line : undefined,
-      typeof err?.column === 'number' ? err.column : undefined,
-    );
+  } catch (err) {
+    // Parser messages can contain source lines, including values from fields
+    // that the schema would have refused as credentials.
+    const location = err as { line?: unknown; column?: unknown };
+    const line = typeof location?.line === 'number' ? location.line : undefined;
+    const column = typeof location?.column === 'number' ? location.column : undefined;
+    const position = line === undefined ? '' : ` (line ${line}${column === undefined ? '' : `, column ${column}`})`;
+    throw new ConfigParseError(`Failed to parse TOML config at ${configPath}${position}.`, line, column);
   }
 
   const result = configSchema.safeParse(parsed);

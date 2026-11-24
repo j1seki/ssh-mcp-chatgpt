@@ -160,13 +160,14 @@ function plant(
 }
 
 describe('ConfigReloader: a refused reload changes nothing', () => {
-  // Each case also proves its canary would have leaked: the raw error from the layer
-  // that refuses does quote it, so the absence below is the reloader's doing.
-  const cases: { name: string; toml: string; raw: (path: string) => Promise<unknown> }[] = [
+  // Check the source diagnostic and the reloader's redacted outcome. TOML
+  // parser excerpts are already suppressed at the loader.
+  const cases: { name: string; toml: string; raw: (path: string) => Promise<unknown>; diagnostic?: RegExp }[] = [
     {
       name: 'malformed TOML',
       toml: `[[profiles]\nname = "${CANARY}"\n`,
       raw: (path) => loadConfigWithDigest(path, {}),
+      diagnostic: /Failed to parse TOML config/,
     },
     {
       name: 'a schema violation',
@@ -197,11 +198,11 @@ describe('ConfigReloader: a refused reload changes nothing', () => {
     },
   ];
 
-  it.each(cases)('$name', async ({ toml, raw }) => {
+  it.each(cases)('$name', async ({ toml, raw, diagnostic }) => {
     const h = await startFrom(BASE);
     const before = snapshot(h);
     await dir.write(toml);
-    await expect(raw(h.path)).rejects.toThrow(CANARY);
+    await expect(raw(h.path)).rejects.toThrow(diagnostic ?? CANARY);
 
     const outcome = await h.reloader.reload('tool', 1);
 

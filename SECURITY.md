@@ -129,6 +129,12 @@ either write site — which strict, by definition, does not reach. Since the mod
 strict is worth setting for exactly one reason: it turns a missing pin into a refusal instead
 of a first-use accept.
 
+SSH Gateway uses strict verification for its HTTP listener by default. Verify
+each fingerprint with the host operator before adding `trustedHostKey`. Stdio
+uses process-local trust on first use unless configured for strict verification.
+The gateway refuses requests to disable verification and requires a non-root
+process user on POSIX systems.
+
 Before 2.8.0 that combination connected to nothing. Strict threw `HOST_KEY_UNKNOWN` for every
 host on every connection — measured, two consecutive connections with the store still at zero
 entries — and a matching `trustedHostKey` did not change it, because the pin never wrote to

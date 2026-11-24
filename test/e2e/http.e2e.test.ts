@@ -7,8 +7,10 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { request } from 'http';
 import { SERVER_ENTRY, e2eAvailable } from './harness.js';
-import { PORTS } from '../integration/fixtures.js';
+import { PORTS, profiles } from '../integration/fixtures.js';
 import { SSH_HOST } from '../integration/helpers.js';
+import { SSHConnection } from '../../src/ssh/connection.js';
+import { TOOL_DESCRIPTIONS } from '../../src/tools/descriptions.js';
 
 // The HTTP transport served exactly one MCP session and stayed dead after that
 // client left. This exercises the multi-session behaviour against the real
@@ -73,6 +75,15 @@ beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), 'ssh-mcp-e2e-http-'));
   await chmod(dir, 0o700);
   const configPath = join(dir, 'config.toml');
+  const knownHosts = new Map<string, string>();
+  const fixture = new SSHConnection(profiles.admin, { password: 'secret' }, knownHosts, 'tofu');
+  try {
+    await fixture.ensureConnected();
+  } finally {
+    await fixture.close();
+  }
+  const fingerprint = knownHosts.get(`${SSH_HOST}:${PORTS.admin}`);
+  if (!fingerprint) throw new Error('The owned SSH fixture did not present a host key');
   await writeFile(configPath, `[defaults]
 defaultProfile = "admin"
 
@@ -84,14 +95,15 @@ user = "admin"
 auth = "password"
 role = "admin"
 group = "dev"
+trustedHostKey = "${fingerprint}"
 `, 'utf8');
   await chmod(configPath, 0o600);
 
   const { SSH_MCP_DISABLE_MAIN: _omit, ...env } = process.env;
   child = spawn('node', [
-    SERVER_ENTRY, `--config=${configPath}`, '--insecureHostKey',
-    '--transport=http', `--httpPort=${PORT}`, `--bearerToken=${BEARER}`,
-  ], { env: { ...env, SSH_MCP_ADMIN_PASSWORD: 'secret' } as Record<string, string>, stdio: 'pipe' });
+    SERVER_ENTRY, `--config=${configPath}`,
+    '--transport=http', `--httpPort=${PORT}`,
+  ], { env: { ...env, SSH_MCP_ADMIN_PASSWORD: 'secret', SSH_MCP_HTTP_TOKEN: BEARER }, stdio: 'pipe' });
 
   // Wait for the listener rather than sleeping a fixed amount.
   await new Promise<void>((resolve, reject) => {
@@ -151,8 +163,10 @@ describe.skipIf(!available)('E2E — HTTP transport', () => {
     const first = await connectClient();
     const second = await connectClient();
 
-    expect((await first.listTools()).tools.length).toBe(16);
-    expect((await second.listTools()).tools.length).toBe(16);
+    for (const client of [first, second]) {
+      const { tools } = await client.listTools();
+      expect(tools.map((tool) => tool.name).sort()).toEqual(Object.keys(TOOL_DESCRIPTIONS).sort());
+    }
 
     // First client goes away; the endpoint must stay usable.
     await first.close();
