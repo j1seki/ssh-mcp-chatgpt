@@ -399,9 +399,10 @@ describe('refineCommand can elaborate the audited string but not replace it', ()
   async function runWith(refined: string) {
     const { createPipeline } = await import('../../../src/tools/pipeline.js');
     const { PolicyEngine, DEFAULT_RULES } = await import('../../../src/policy/engine.js');
+    const { SSHConnection } = await import('../../../src/ssh/connection.js');
     const { testProfile } = await import('./harness.js');
     const records: any[] = [];
-    const conn: any = { profile: testProfile };
+    const conn = new SSHConnection(testProfile, {}, new Map());
     const pipeline = createPipeline({
       server: {} as any,
       registry: {
