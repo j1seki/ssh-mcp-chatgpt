@@ -28,6 +28,8 @@ export interface AuditState {
   command: string;
   /** Set once the policy engine actually produced a decision. */
   evaluation?: PolicyEvaluation;
+  /** Keep the credential redactor even if a reload removes this connection. */
+  connection?: SSHConnection;
 }
 
 /** Policy never ran — the input was rejected at the boundary. */
@@ -134,6 +136,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     command: string,
     profileName: string,
     toolName: string,
+    state: AuditState,
     resource: PolicyResource = {},
     synthetic = false,
   ) {
@@ -146,6 +149,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
       // or against a connection the reload has since closed.
       const genAtEval = registry.generation;
       const conn = await resolveConn(profileName);
+      state.connection = conn;
       // Read before evaluating: a reload swaps conn.profile in place, and which gate
       // applies has to follow the rules the evaluation was made under.
       const approvalPolicyAtEval = conn.profile.approvalPolicy;
@@ -337,8 +341,9 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     evaluation: PolicyEvaluation,
     result: CommandResult | { error: string },
     approver?: string,
-    conn = registry.get(profileName),
+    conn?: SSHConnection,
   ) {
+    const connection = conn ?? connectionForAudit(profileName);
     const error = 'error' in result ? result.error : undefined;
     await audit.record({
       mcpRequestId: ctx.requestId,
@@ -349,14 +354,14 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
       // swallows that by design. The record the operator most needs was the one record that
       // could not be written.
       user: profileUser(profileName),
-      command: conn?.redactCredentials(command) ?? command,
+      command: connection?.redactCredentials(command) ?? command,
       commandClass: evaluation.commandClass,
-      binary: conn?.redactCredentials(evaluation.binary) ?? evaluation.binary,
+      binary: connection?.redactCredentials(evaluation.binary) ?? evaluation.binary,
       decision: evaluation.decision,
       ruleId: evaluation.ruleId,
       exitCode: 'exitCode' in result ? result.exitCode : undefined,
       durationMs: 'durationMs' in result ? result.durationMs : undefined,
-      error: error === undefined ? undefined : conn?.redactCredentials(error) ?? error,
+      error: error === undefined ? undefined : connection?.redactCredentials(error) ?? error,
       approver,
     });
   }
@@ -385,7 +390,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     try {
       await auditResult(ctx, profileName, state.command, evaluation, {
         error: err?.message ?? String(err),
-      });
+      }, undefined, state.connection);
     } catch (auditErr) {
       console.error('Audit write failed while recording a tool failure:', auditErr);
     }
@@ -398,6 +403,11 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
   /** The profile's SSH user, or a placeholder — never throws, so an audit write cannot fail. */
   function profileUser(profileName: string): string {
     return registry.listAllProfiles().find((p) => p.name === profileName)?.user ?? '(unresolved)';
+  }
+
+  function connectionForAudit(profileName: string): SSHConnection | undefined {
+    if (!registry.listAllProfiles().some((profile) => profile.name === profileName)) return;
+    return registry.get(profileName);
   }
 
   function makeProgressSender(extra: any): ((bytes: number, tail: string) => void) | undefined {
@@ -488,7 +498,6 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     // the first statement inside, so the quota key and the audit record are unchanged on
     // every path that gets that far.
     let profileName = opts.profile ?? '(default)';
-    let connection: SSHConnection | undefined;
 
     // Profile resolution and sanitization both run inside the try, so a rejected call
     // still leaves an audit trail — a client probing with malformed payloads, or probing
@@ -509,9 +518,8 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
       }
 
       const { conn, evaluation, approver } = await checkPolicyAndApprove(
-        effective, profileName, opts.toolName, opts.resource, opts.synthetic ?? false,
+        effective, profileName, opts.toolName, state, opts.resource, opts.synthetic ?? false,
       );
-      connection = conn;
       state.evaluation = evaluation;
 
       if (opts.enforceClass && evaluation.commandClass !== opts.enforceClass) {
@@ -568,7 +576,7 @@ export function createPipeline({ server, registry, policy, audit }: ToolDeps) {
     } catch (err: any) {
       await auditFailure(ctx, profileName, state, opts.failureClass, err);
       const message = err instanceof Error ? err.message : String(err);
-      const sanitized = (connection ?? registry.get(profileName))?.redactCredentials(message) ?? message;
+      const sanitized = (state.connection ?? connectionForAudit(profileName))?.redactCredentials(message) ?? message;
       if (sanitized !== message) throw new Error(sanitized);
       throw err;
     }
